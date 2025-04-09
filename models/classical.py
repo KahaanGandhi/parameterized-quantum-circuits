@@ -1,5 +1,3 @@
-# models/classical.py
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -9,7 +7,6 @@ import gym
 from collections import deque
 import random
 import copy
-
 
 class DQN(nn.Module):
     """
@@ -54,10 +51,12 @@ class ReplayBuffer:
 
 
 def train_dqn_simple(env_name, state_dim, n_actions, n_episodes=500, batch_size=64, gamma=0.99,
-                     lr=1e-3, buffer_capacity=10000, epsilon_start=1.0, epsilon_final=0.01, epsilon_decay=500):
+                     lr=1e-3, buffer_capacity=10000, epsilon_start=1.0, epsilon_final=0.01, epsilon_decay=500,
+                     solved_threshold=500.0, window=10):
     """
     Simple training loop for a DQN agent.
     Uses one network (no target network) and MSE loss.
+    Early stopping is applied if the average reward over the last 'window' episodes exceeds 'solved_threshold'.
     """
     env = gym.make(env_name)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -112,6 +111,13 @@ def train_dqn_simple(env_name, state_dim, n_actions, n_episodes=500, batch_size=
         if (episode + 1) % 10 == 0:
             avg_reward = np.mean(episode_rewards[-10:])
             print(f"Simple DQN: Episode {episode+1}/{n_episodes}, Avg Reward: {avg_reward:.2f}, Epsilon: {epsilon:.3f}")
+        
+        # Early stopping if environment is solved
+        if len(episode_rewards) >= window:
+            avg_recent = np.mean(episode_rewards[-window:])
+            if avg_recent >= solved_threshold:
+                print(f"Environment solved in {episode+1} episodes! Average reward: {avg_recent:.2f}")
+                break
     
     env.close()
     return agent, episode_rewards
@@ -119,10 +125,11 @@ def train_dqn_simple(env_name, state_dim, n_actions, n_episodes=500, batch_size=
 
 def train_dqn_advanced(env_name, state_dim, n_actions, n_episodes=1000, batch_size=64, gamma=0.99,
                        lr=1e-3, buffer_capacity=10000, epsilon_start=1.0, epsilon_final=0.01, epsilon_decay=500,
-                       target_update_freq=10):
+                       target_update_freq=10, solved_threshold=500.0, window=10):
     """
     Advanced training loop for a DQN agent.
     Uses a target network (updated periodically), Huber loss, and more robust replay.
+    Early stopping is applied if the average reward over the last 'window' episodes exceeds 'solved_threshold'.
     """
     env = gym.make(env_name)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -184,6 +191,13 @@ def train_dqn_advanced(env_name, state_dim, n_actions, n_episodes=1000, batch_si
         if (episode + 1) % 10 == 0:
             avg_reward = np.mean(episode_rewards[-10:])
             print(f"Advanced DQN: Episode {episode+1}/{n_episodes}, Avg Reward: {avg_reward:.2f}, Epsilon: {epsilon:.3f}")
+        
+        # Early stopping if environment is solved
+        if len(episode_rewards) >= window:
+            avg_recent = np.mean(episode_rewards[-window:])
+            if avg_recent >= solved_threshold:
+                print(f"Environment solved in {episode+1} episodes! Average reward: {avg_recent:.2f}")
+                break
     
     env.close()
     return agent, episode_rewards

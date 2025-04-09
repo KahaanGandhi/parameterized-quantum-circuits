@@ -1,5 +1,3 @@
-# models/quantum.py
-
 import pennylane as qml
 import torch
 import torch.nn as nn
@@ -141,10 +139,11 @@ class QuantumAgent(nn.Module):
         return self.softmax(x)
 
 
-def train_quantum(agent, env_name, n_episodes, batch_size, gamma, learning_rates, state_bounds):
+def train_quantum(agent, env_name, n_episodes, batch_size, gamma, learning_rates, state_bounds, solved_threshold=500.0, window=10):
     """
     Training loop for the quantum agent using a REINFORCE-style update.
     Returns the trained agent and the list of episode rewards.
+    Early stopping is applied if the average reward over the last 'window' episodes exceeds 'solved_threshold'.
     """
     optimizer_upload = torch.optim.Adam(agent.pqc.parameters(), lr=learning_rates['uploading'], amsgrad=True)
     optimizer_output = torch.optim.Adam(agent.alternating.parameters(), lr=learning_rates['output'], amsgrad=True)
@@ -208,6 +207,13 @@ def train_quantum(agent, env_name, n_episodes, batch_size, gamma, learning_rates
         if (episode + 1) % batch_size == 0:
             avg_reward = np.mean(episode_rewards[-batch_size:])
             print(f"Quantum: Episode {episode+1}/{n_episodes}, Avg Reward: {avg_reward:.2f}, Loss: {loss.item():.4f}")
+        
+        # Early stopping if environment is solved
+        if len(episode_rewards) >= window:
+            avg_recent = np.mean(episode_rewards[-window:])
+            if avg_recent >= solved_threshold:
+                print(f"Environment solved in {episode+1} episodes! Average reward: {avg_recent:.2f}")
+                break
     
     env.close()
     return agent, episode_rewards
