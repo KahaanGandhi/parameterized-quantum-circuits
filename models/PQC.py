@@ -25,7 +25,7 @@ class QuantumCircuit:
 
     def _one_qubit_rotation(self, qubit, params):
         """
-        Applies rotation operators, effectively rotating the Bloch sphere.
+        Applies rotation operators, rotating the Bloch sphere of a single wire.
         """
         qml.RX(params[0], wires=qubit)
         qml.RY(params[1], wires=qubit)
@@ -33,7 +33,7 @@ class QuantumCircuit:
 
     def _entangling_layer(self):
         """
-        Creates a layer of CZ entangling gates on qubits, arranged in a circular topology.
+        Creates a layer of CZ entangling gates across all wires, arranged in a circular topology.
         """
         for i in range(self.n_qubits):
             qml.CZ(wires=[i, (i + 1) % self.n_qubits])
@@ -148,7 +148,8 @@ def train_pqc(agent, env_name, n_episodes=500, gamma=1.0,
     episode_rewards = []
     best_reward = -float('inf')
     best_model_state = None
-    pbar = tqdm(range(n_episodes), desc="[PQC] Episodes", leave=False)
+
+    pbar = tqdm(range(n_episodes), desc="{:18}".format("PQC Episodes"), leave=False)
     for i_episode in pbar:
         state, info = env.reset(seed=seed)
         done = False
@@ -166,17 +167,17 @@ def train_pqc(agent, env_name, n_episodes=500, gamma=1.0,
             done = terminated or truncated
             state = next_state
 
-        # If reward ≥500, mark remaining episodes solved
+        # # If reward ≥500, mark remaining episodes solved
         episode_total = np.sum(rewards)
-        if episode_total >= 500:
-            remaining = n_episodes - i_episode - 1
-            episode_rewards.append(episode_total)
-            episode_rewards.extend([500] * remaining)
-            # pbar.set_description(f"[PQC] Episode {i_episode+1}/500 (Solved)")
-            if episode_total > best_reward:
-                best_reward = episode_total
-                best_model_state = agent.state_dict()
-            break
+        # if episode_total >= 500:
+        #     remaining = n_episodes - i_episode - 1
+        #     episode_rewards.append(episode_total)
+        #     episode_rewards.extend([500] * remaining)
+        #     # pbar.set_description(f"[PQC] Episode {i_episode+1}/500 (Solved)")
+        #     if episode_total > best_reward:
+        #         best_reward = episode_total
+        #         best_model_state = agent.state_dict()
+        #     break
 
         # Compute discounted returns for each time step
         R = 0
@@ -204,7 +205,6 @@ def train_pqc(agent, env_name, n_episodes=500, gamma=1.0,
         optimizer_output.step()
 
         episode_rewards.append(episode_total)
-        pbar.set_description(f"[PQC] Episode")
         if episode_total > best_reward:
             best_reward = episode_total
             best_model_state = agent.state_dict()

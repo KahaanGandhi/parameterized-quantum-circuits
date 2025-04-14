@@ -20,8 +20,7 @@ class ReplayMemory:
         self.memory = deque([], maxlen=capacity)
 
     def push(self, *args):
-        """Save a transition"""
-        self.memory.append(Transition(*args))
+        self.memory.append(Transition(*args))  # Save a transition
 
     def sample(self, batch_size):
         return random.sample(self.memory, batch_size)
@@ -43,15 +42,16 @@ class DQN(nn.Module):
         return self.layer3(x)
 
 class DQNAgent:
-    def __init__(self, n_observations, n_actions, device):
-        # Hyperparameters
-        self.BATCH_SIZE = 64
-        self.GAMMA = 0.99
-        self.EPS_START = 0.9
-        self.EPS_END = 0.05
-        self.EPS_DECAY = 1000
-        self.TAU = 0.005
-        self.LR = 1e-3
+    def __init__(self, n_observations, n_actions, device, 
+                 batch_size=128, gamma=0.99, eps_start=0.9, eps_end=0.05, eps_decay=1000, tau=0.005, lr=1e-4):
+        # Hyperparameters (default from PyTorch documentation)
+        self.BATCH_SIZE = batch_size
+        self.GAMMA = gamma
+        self.EPS_START = eps_start
+        self.EPS_END = eps_end
+        self.EPS_DECAY = eps_decay
+        self.TAU = tau
+        self.LR = lr
 
         self.steps_done = 0
         self.n_observations = n_observations
@@ -68,7 +68,9 @@ class DQNAgent:
         self.memory = ReplayMemory(10000)
 
     def select_action(self, state, env=None):
-        """Selects an action using an epsilon-greedy policy."""
+        """
+        Selects an action using an epsilon-greedy policy.
+        """
         sample = random.random()
         eps_threshold = self.EPS_END + (self.EPS_START - self.EPS_END) * math.exp(-self.steps_done / self.EPS_DECAY)
         self.steps_done += 1
@@ -83,7 +85,9 @@ class DQNAgent:
                 return torch.tensor([[random.randrange(self.n_actions)]], device=self.device, dtype=torch.long)
 
     def optimize_model(self):
-        """Performs one step of optimization on the policy network."""
+        """
+        Performs one step of optimization on the policy network.
+        """
         if len(self.memory) < self.BATCH_SIZE:
             return None
 
@@ -121,7 +125,9 @@ class DQNAgent:
         return loss.item()
 
     def soft_update_target(self):
-        """Soft update: θ′ ← τ θ + (1 - τ) θ′."""
+        """
+        Soft update: θ′ ← τ θ + (1 - τ) θ′
+        """
         target_net_state_dict = self.target_net.state_dict()
         policy_net_state_dict = self.policy_net.state_dict()
         for key in policy_net_state_dict:
@@ -132,7 +138,7 @@ class DQNAgent:
         env = gym.make(env_name, render_mode=None)
         episode_rewards = []
 
-        pbar = tqdm(range(num_episodes), desc="[DQN] Episodes", leave=False)
+        pbar = tqdm(range(num_episodes), desc="{:18}".format("DQN Episodes"), leave=False)
         for i_episode in pbar:
             state, info = env.reset(seed=777)
             state = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
@@ -159,19 +165,19 @@ class DQNAgent:
                 self.optimize_model()
                 self.soft_update_target()
 
-                pbar.set_description(f"[DQN] Episode")
+                # pbar.set_description(f"[DQN] Episode {i_episode+1}")
 
                 if done:
                     break
 
             episode_rewards.append(total_reward)
             
-            # If reward ≥500, mark remaining episodes solved
-            if total_reward >= 500:
-                remaining = num_episodes - i_episode - 1
-                episode_rewards.extend([500] * remaining)
-                # pbar.set_description(f"[DQN] Episode {i_episode+1}/500 (Solved)")
-                break
+            # Early stopping if solved (optional; uncomment to enable)
+            # if total_reward >= 500:
+            #     remaining = num_episodes - i_episode - 1
+            #     episode_rewards.extend([500] * remaining)
+            #     # pbar.set_description(f"[DQN] Episode {i_episode+1}/500 (Solved)")
+            #     break
 
         env.close()
         return episode_rewards
