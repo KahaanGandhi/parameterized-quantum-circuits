@@ -7,7 +7,6 @@ import os
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
-# Set seed for reproducibility
 seed = 777
 np.random.seed(seed)
 torch.manual_seed(seed)
@@ -25,23 +24,35 @@ class QuantumCircuit:
         self.circuit = qml.QNode(self._circuit_impl, self.dev, interface="torch")
 
     def _one_qubit_rotation(self, qubit, params):
+        """
+        Applies rotation operators, effectively rotating the Bloch sphere.
+        """
         qml.RX(params[0], wires=qubit)
         qml.RY(params[1], wires=qubit)
         qml.RZ(params[2], wires=qubit)
 
     def _entangling_layer(self):
+        """
+        Creates a layer of CZ entangling gates on qubits, arranged in a circular topology.
+        """
         for i in range(self.n_qubits):
             qml.CZ(wires=[i, (i + 1) % self.n_qubits])
 
     def _circuit_impl(self, params, inputs):
+        """
+        Generates the data re-uploading circuit architecture.
+        """
         params = params.reshape(self.n_layers + 1, self.n_qubits, 3)
         inputs = inputs.reshape(self.n_layers, self.n_qubits)
         for l in range(self.n_layers):
+            # Variational layer
             for i in range(self.n_qubits):
                 self._one_qubit_rotation(i, params[l, i])
             self._entangling_layer()
+            # Encoding layer
             for i in range(self.n_qubits):
                 qml.RX(inputs[l, i], wires=i)
+        # Final variational layer
         for i in range(self.n_qubits):
             self._one_qubit_rotation(i, params[-1, i])
         return qml.expval(qml.PauliZ(0) @ qml.PauliZ(1) @ qml.PauliZ(2) @ qml.PauliZ(3))
@@ -57,14 +68,17 @@ class QuantumCircuit:
         plt.close(fig)
         return fig, ax
 
-# ReUploadingPQC wraps the quantum circuit and adds trainable parameters
 class ReUploadingPQC(nn.Module):
+    """
+    Wraps the quantum circuit and adds trainable parameters.
+    """
     def __init__(self, n_qubits, n_layers, activation=nn.Identity()):
         super(ReUploadingPQC, self).__init__()
         self.n_qubits = n_qubits
         self.n_layers = n_layers
         self.activation = activation
         self.quantum_circuit = QuantumCircuit(n_qubits, n_layers)
+        # Random initialization of trainable parameters
         self.theta = nn.Parameter(torch.rand(1, self.quantum_circuit.n_params) * np.pi)
         self.lmbd = nn.Parameter(torch.ones(self.n_qubits * self.n_layers))
 
@@ -86,6 +100,7 @@ class Alternating(nn.Module):
         self.w = nn.Parameter(torch.Tensor([[(-1) ** i for i in range(output_dim)]]))
 
     def forward(self, x):
+        # Weigh observable vector x by action-specific weight vector w
         return torch.matmul(x, self.w)
 
 # PQCAgent combines the PQC with a post-processing layer that outputs a probability distribution
@@ -98,12 +113,14 @@ class PQCAgent(nn.Module):
         self.softmax = nn.Softmax(dim=1)
 
     def forward(self, x):
+        """
+        Generates model policy. Gathers weighted observables and applies softmax with fixed temperature.
+        """
         x = self.pqc(x)
         x = self.alternating(x)
         x = x * self.beta
         return self.softmax(x)
 
-    # Added evaluate method to fix the error: 'PQCAgent' has no attribute 'evaluate'
     def evaluate(self, env_name, state_bounds=np.array([2.4, 2.5, 0.21, 2.5]), render=False):
         env = gym.make(env_name, render_mode='rgb_array' if render else None)
         state, info = env.reset(seed=seed)
@@ -155,7 +172,7 @@ def train_pqc(agent, env_name, n_episodes=500, gamma=1.0,
             remaining = n_episodes - i_episode - 1
             episode_rewards.append(episode_total)
             episode_rewards.extend([500] * remaining)
-            pbar.set_description(f"[PQC] Episode {i_episode+1}/500 (Solved)")
+            # pbar.set_description(f"[PQC] Episode {i_episode+1}/500 (Solved)")
             if episode_total > best_reward:
                 best_reward = episode_total
                 best_model_state = agent.state_dict()
@@ -187,7 +204,7 @@ def train_pqc(agent, env_name, n_episodes=500, gamma=1.0,
         optimizer_output.step()
 
         episode_rewards.append(episode_total)
-        pbar.set_description(f"[PQC] Episode {i_episode+1}/500")
+        pbar.set_description(f"[PQC] Episode")
         if episode_total > best_reward:
             best_reward = episode_total
             best_model_state = agent.state_dict()
