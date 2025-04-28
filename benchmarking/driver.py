@@ -1,3 +1,5 @@
+# Run from root directory with: python -m benchmarking.driver
+
 import os
 import numpy as np
 import matplotlib.pyplot as plt
@@ -6,12 +8,8 @@ import argparse
 import torch
 from tqdm import tqdm
 
-from models.DQN import DQNAgent
-from models.PQC import PQCAgent, train_pqc, evaluate_pqc
-
-# TODO: add early stopping to ArgParse
-# TODO: add model.train() and model.evaluate() functions (utils...?)
-# TODO: for official run, be able to vary multiple depths
+from benchmarking.models.DQN import DQNAgent
+from benchmarking.models.PQC import PQCAgent, train_pqc, evaluate_pqc
 
 def plot_benchmarks(results_dict, title="Benchmark", filename="outputs/benchmark_rewards.png"):
     """

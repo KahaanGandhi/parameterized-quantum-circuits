@@ -233,7 +233,6 @@ def evaluate_pqc(agent, env_name, state_bounds=np.array([2.4, 2.5, 0.21, 2.5]), 
     env.close()
     return total_reward
 
-# Uncomment to run training directly:
 # if __name__ == "__main__":
 #     env_name = "CartPole-v1"
 #     n_qubits = 4
