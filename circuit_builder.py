@@ -4,14 +4,19 @@ import torch.nn as nn
 import numpy as np
 import gymnasium as gym
 import os
+import locale
 import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib import animation
 from IPython.display import HTML
 from IPython.display import display
 from tqdm import tqdm
-
+from pennylane import draw_mpl
 from configs import ENV_CONFIGS
+
+# TODO: add more configs
+# TODO: add different entangling topologies
+# TODO: decide in speedrun depth -- benchmark depth on CartPole-v1
 
 seed = 777
 np.random.seed(seed)
@@ -119,14 +124,14 @@ class BlockSequence:
     def __init__(self):
         self.sequence = []
     
-    def add_variational(self):
+    def VariationalLayer(self):
         """
         Add a variational block to the sequence.
         """
         self.sequence.append("variational")
         return self
     
-    def add_encoding(self):
+    def EncodingLayer(self):
         """
         Add an encoding block to the sequence.
         """
@@ -150,7 +155,7 @@ class ParameterizedQuantumCircuit(nn.Module):
     PyTorch-style quantum policy network using the REINFORCE algorithm.
     """
     def __init__(self, env_name: str = 'CartPole-v1', n_qubits: int = None, beta: float = None, 
-                 heuristic_ansatz: int = None, custom_blocks: BlockSequence = None):
+                 hardware_efficient_ansatz: int = None, custom_blocks: BlockSequence = None):
         super().__init__()
 
         # Get environment configuration
@@ -179,13 +184,13 @@ class ParameterizedQuantumCircuit(nn.Module):
         self._quantum_blocks = []
         self.__class__.__setattr__ = _track_blocks_setattr
 
-        # Add quantum blocks based on specified pattern
+        # Add quantum blocks based on specified sequence
         if custom_blocks is not None:
             custom_blocks(self)
-        elif heuristic_ansatz is not None:
-            HardwareEfficientAnsatz(heuristic_ansatz)(self)
+        elif hardware_efficient_ansatz is not None:
+            HardwareEfficientAnsatz(hardware_efficient_ansatz)(self)
         else:
-            # Default to a simple pattern
+            # Default to a simple architecture
             HardwareEfficientAnsatz(1)(self)
 
         # Classical post-processing layer
@@ -236,12 +241,12 @@ class ParameterizedQuantumCircuit(nn.Module):
         self._lambda = nn.Parameter(torch.ones(self.total_inputs))
 
     @classmethod
-    def speedrun(cls, env_name: str = 'CartPole-v1', ansatz_layers: int = 20, beta: float = None, 
+    def speedrun(cls, env_name: str = 'CartPole-v1', ansatz_layers: int = 5, beta: float = None, 
                  n_qubits: int = None) -> 'ParameterizedQuantumCircuit':
         """
         One-line constructor for a hardware-efficient ansatz with increased depth.
         """
-        return cls(env_name=env_name, beta=beta, heuristic_ansatz=ansatz_layers, n_qubits=n_qubits)
+        return cls(env_name=env_name, beta=beta, hardware_efficient_ansatz=ansatz_layers, n_qubits=n_qubits)
     
     def animate(self, n_steps: int = None, save: bool = True, filename: str = 'performance.gif',
                 fps: int = 20, state_bounds: np.ndarray = None):
@@ -307,10 +312,10 @@ class ParameterizedQuantumCircuit(nn.Module):
         action_probs = self.softmax(logits)
         return action_probs
 
-    def train(self, gamma: float = 1.0, plot: bool = True, save: bool = True, 
-              animate: bool = True, early_stopping: bool = True) -> tuple:
+    def train(self, gamma: float = 1.0, plot: bool = True, save: bool = True, animate: bool = True, 
+              early_stopping: bool = True, return_histories: bool = False) -> (None or 'tuple'): # type: ignore
         """
-        Train the policy using the REINFORCE algorithm.
+        Train the policy using the PQC REINFORCE algorithm.
         """
         # Use environment-specific configuration
         env_config = ENV_CONFIGS[self.env_name]
@@ -391,7 +396,9 @@ class ParameterizedQuantumCircuit(nn.Module):
                 best_reward = total_reward
                 best_state = self.state_dict()
 
-            print(f"Episode {episode+1}: Reward = {total_reward}", end="\r")
+            # print(f"Episode {episode+1}: Reward = {total_reward}", end="\r")
+            print(f"Episode {episode+1}: Reward = {total_reward}")
+
 
             if early_stopping and best_reward >= threshold:
                 print(f"Environment solved in {episode+1} episodes! Reward={best_reward:.2f}")
@@ -420,7 +427,10 @@ class ParameterizedQuantumCircuit(nn.Module):
                 animation_html = self.animate(save=save, filename='final_performance.gif', state_bounds=state_bounds)
                 display(animation_html)
 
-        return self.loss_history, self.reward_history
+        if return_histories:
+            return self.loss_history, self.reward_history
+        else:
+            return None
 
     def evaluate(self, render: bool = False, state_bounds: np.ndarray = None) -> float:
         """
@@ -455,8 +465,6 @@ class ParameterizedQuantumCircuit(nn.Module):
         os.makedirs('outputs', exist_ok=True)
         
         plt.figure(figsize=(10, 6), dpi=300)
-        
-        # Plot episode rewards with transparency
         plt.plot(self.reward_history, color='dodgerblue', alpha=1.0, label='Episode Reward')
         
         # Add threshold line
@@ -470,12 +478,41 @@ class ParameterizedQuantumCircuit(nn.Module):
         plt.title(f'Training Rewards on {self.env_name}', fontsize=14, fontweight='bold')
         plt.legend(loc='best', frameon=True, framealpha=0.9)
         plt.grid(True, alpha=0.3)
-        
         plt.tight_layout()
         plt.savefig('outputs/pqc_training.png', dpi=300, bbox_inches='tight')
         plt.show()
+        
+    def draw_circuit(self, style='pennylane_sketch', fontsize='small', dpi=300):
+        """
+        Draw the circuit diagram of the PQC with all trained parameters.
+        """
+        # Suppress a fontconfig warning
+        os.environ['LC_ALL'] = 'en_US.UTF-8'
+        os.environ['LANG']   = 'en_US.UTF-8'
+        locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
+                
+        reuploading_input = [f"$x_{i % self.n_qubits}$" for i in range(self.total_inputs)]
+        scaled_input = [f"{reuploading_input[i]} • {self._lambda.detach()[i].item():.2f}" for i in range(self.total_inputs)]        
+        drawing = draw_mpl(self.circuit, style=style, show_all=True, show_wires=True, decimals=2, fontsize=fontsize)
+        drawing(theta_flat=self._theta.detach(), input_flat=scaled_input)
+        plt.show()
 
-# if __name__ == "__main__":
-#     # Speedrun
-#     pqc = ParameterizedQuantumCircuit.speedrun(env_name='LunarLander-v2', ansatz_layers=20)
-#     pqc.train()
+        
+if __name__ == "__main__":
+    sequence = (BlockSequence()
+        .EncodingLayer()
+        .VariationalLayer()
+        .EncodingLayer()
+        .VariationalLayer()
+        .EncodingLayer()
+        .VariationalLayer()
+    )
+
+    model = ParameterizedQuantumCircuit(
+        env_name='CartPole-v1',
+        n_qubits=4,
+        beta=1.0,
+        custom_blocks=sequence,
+    )
+
+    model.draw_circuit()
