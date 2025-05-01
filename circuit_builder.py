@@ -7,9 +7,10 @@ import os
 import locale
 import matplotlib
 import matplotlib.pyplot as plt
+from PIL import Image
 from matplotlib import animation
 from IPython.display import HTML
-from IPython.display import display
+from IPython.display import Markdown, display
 from tqdm import tqdm
 from pennylane import draw_mpl
 from configs import ENV_CONFIGS
@@ -252,7 +253,8 @@ class ParameterizedQuantumCircuit(nn.Module):
     def animate(self, n_steps: int = None, save: bool = True, filename: str = 'performance.gif',
                 fps: int = 20, state_bounds: np.ndarray = None):
         """
-        Run the current policy in the environment, capture frames, and return an animation to be displayed inline in Jupyter.
+        Run the current policy in the environment, capture frames, and save as a GIF.
+        Returns the path to the saved GIF and displays Markdown for embedding.
         """
         env = gym.make(self.env_name, render_mode='rgb_array')
         if state_bounds is None:
@@ -271,29 +273,32 @@ class ParameterizedQuantumCircuit(nn.Module):
             action = int(np.argmax(probs))
             next_state, _, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
+            # Capture frame as PIL Image
             frame = env.render()
-            frames.append(frame)
+            im = Image.fromarray(frame)
+            frames.append(im)
             state = next_state
             steps += 1
 
         env.close()
 
-        fig = plt.figure(figsize=(6, 6))
-        plt.axis('off')
-        ims = []
-        for img in frames:
-            im = plt.imshow(img, animated=True)
-            ims.append([im])
-
-        ani = animation.ArtistAnimation(fig, ims, interval=1000/fps, blit=True, repeat_delay=1000)
-        
+        # Save the GIF using PIL
         if save:
             os.makedirs('outputs', exist_ok=True)
-            ani.save(os.path.join('outputs', filename), writer='pillow', fps=fps)
-            print(f"Animation saved to outputs/{filename}")
+            gif_path = os.path.join('outputs', filename)
+            frames[0].save(
+                gif_path,
+                save_all=True,
+                append_images=frames[1:],
+                optimize=False,
+                duration=int(1000/fps),  # Duration in milliseconds per frame
+                loop=0
+            )
+            print(f"Animation saved to {gif_path}")
+            # Display Markdown to embed the GIF
+            display(Markdown(f"![Animation]({gif_path})"))
 
-        plt.close(fig)
-        return HTML(ani.to_jshtml())  # Return only the HTML version for Jupyter
+        return gif_path
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -419,17 +424,15 @@ class ParameterizedQuantumCircuit(nn.Module):
             if save and best_state is not None:
                 current_state = self.state_dict()
                 self.load_state_dict(best_state)
-                animation_html = self.animate(save=True, filename='best_performance.gif', state_bounds=state_bounds)
-                display(animation_html)
+                gif_path = self.animate(save=True, filename='best_performance.gif', state_bounds=state_bounds)
                 self.load_state_dict(current_state)
             else:
-                animation_html = self.animate(save=save, filename='final_performance.gif', state_bounds=state_bounds)
-                display(animation_html)
+                gif_path = self.animate(save=save, filename='final_performance.gif', state_bounds=state_bounds)
 
-        if return_histories:
-            return self.loss_history, self.reward_history
-        else:
-            return None
+            if return_histories:
+                return self.loss_history, self.reward_history
+            else:
+                return None
 
     def evaluate(self, render: bool = False, state_bounds: np.ndarray = None) -> float:
         """
@@ -491,7 +494,8 @@ class ParameterizedQuantumCircuit(nn.Module):
         locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
                 
         reuploading_input = [f"$x_{i % self.n_qubits}$" for i in range(self.total_inputs)]
-        scaled_input = [f"{reuploading_input[i]} • {self._lambda.detach()[i].item():.2f}" for i in range(self.total_inputs)]        
+        scaled_input = [f"{reuploading_input[i]} • {self._lambda.detach()[i].item():.2f}" for i in range(self.total_inputs)]
+                
         # drawing = draw_mpl(self.circuit, style=style, show_all=True, show_wires=True, decimals=2, fontsize=fontsize)
         # drawing(theta_flat=self._theta.detach(), input_flat=scaled_input)
         
