@@ -17,6 +17,7 @@ from configs import ENV_CONFIGS
 # TODO: add more configs
 # TODO: add different entangling topologies
 # TODO: decide in speedrun depth -- benchmark depth on CartPole-v1
+# TODO: clean up demo.ipynb -- animations, diagrams
 
 seed = 777
 np.random.seed(seed)
@@ -312,7 +313,7 @@ class ParameterizedQuantumCircuit(nn.Module):
         action_probs = self.softmax(logits)
         return action_probs
 
-    def train(self, gamma: float = 1.0, plot: bool = True, save: bool = True, animate: bool = True, 
+    def train(self, gamma: float = 1.0, plot: bool = False, save: bool = True, animate: bool = True, 
               early_stopping: bool = True, return_histories: bool = False) -> (None or 'tuple'): # type: ignore
         """
         Train the policy using the PQC REINFORCE algorithm.
@@ -396,9 +397,7 @@ class ParameterizedQuantumCircuit(nn.Module):
                 best_reward = total_reward
                 best_state = self.state_dict()
 
-            # print(f"Episode {episode+1}: Reward = {total_reward}", end="\r")
-            print(f"Episode {episode+1}: Reward = {total_reward}")
-
+            print(f"Episode {episode+1}: Reward = {total_reward}", end="\r")
 
             if early_stopping and best_reward >= threshold:
                 print(f"Environment solved in {episode+1} episodes! Reward={best_reward:.2f}")
@@ -482,7 +481,7 @@ class ParameterizedQuantumCircuit(nn.Module):
         plt.savefig('outputs/pqc_training.png', dpi=300, bbox_inches='tight')
         plt.show()
         
-    def draw_circuit(self, style='pennylane_sketch', fontsize='small', dpi=300):
+    def draw_circuit(self, style='pennylane_sketch', fontsize='small', dpi=300, title=None):
         """
         Draw the circuit diagram of the PQC with all trained parameters.
         """
@@ -493,8 +492,13 @@ class ParameterizedQuantumCircuit(nn.Module):
                 
         reuploading_input = [f"$x_{i % self.n_qubits}$" for i in range(self.total_inputs)]
         scaled_input = [f"{reuploading_input[i]} • {self._lambda.detach()[i].item():.2f}" for i in range(self.total_inputs)]        
-        drawing = draw_mpl(self.circuit, style=style, show_all=True, show_wires=True, decimals=2, fontsize=fontsize)
-        drawing(theta_flat=self._theta.detach(), input_flat=scaled_input)
+        # drawing = draw_mpl(self.circuit, style=style, show_all=True, show_wires=True, decimals=2, fontsize=fontsize)
+        # drawing(theta_flat=self._theta.detach(), input_flat=scaled_input)
+        
+        drawer = draw_mpl(self.circuit, style=style, show_all=True, show_wires=True, decimals=2, fontsize=fontsize)
+        fig, ax = drawer(theta_flat=self._theta.detach(), input_flat=scaled_input)
+        if title is not None:
+            fig.suptitle(title, fontweight="bold", fontsize=16) 
         plt.show()
 
         
@@ -515,4 +519,4 @@ if __name__ == "__main__":
         custom_blocks=sequence,
     )
 
-    model.draw_circuit()
+    model.draw_circuit(title="test")

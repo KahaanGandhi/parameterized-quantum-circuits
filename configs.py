@@ -11,6 +11,7 @@ ENV_CONFIGS = {
     "n_episodes": 500,
     "n_qubits": None,  # Always autodetected from enviornments
   },
+  
   "LunarLander-v2": {
     "state_bounds": np.array([1.5,1.5,5.0,5.0,3.14,5.0,1.0,1.0]),
     "learning_rate_theta": 0.001,
