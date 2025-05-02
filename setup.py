@@ -12,6 +12,7 @@ setup(
         "matplotlib",
         "tqdm",
         "pillow",
+        "qutip",
     ],
     python_requires=">=3.8",
 )

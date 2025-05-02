@@ -7,6 +7,8 @@ import os
 import locale
 import matplotlib
 import matplotlib.pyplot as plt
+import qutip
+from qutip import Bloch
 from PIL import Image
 from matplotlib import animation
 from IPython.display import HTML
@@ -16,9 +18,10 @@ from pennylane import draw_mpl
 from configs import ENV_CONFIGS
 
 # TODO: add more configs
+# TODO: update setup
 # TODO: add different entangling topologies
-# TODO: decide in speedrun depth -- benchmark depth on CartPole-v1
 # TODO: clean up demo.ipynb -- animations, diagrams
+# TODO: look through animation code, clean it up
 
 seed = 777
 np.random.seed(seed)
@@ -199,7 +202,7 @@ class ParameterizedQuantumCircuit(nn.Module):
         self.alternating = Alternating(self.n_actions)
         self.softmax = nn.Softmax(dim=1)
 
-        # Define PennyLane QNode
+        # Define PennyLane QNode for the full circuit
         self.dev = qml.device('default.qubit', wires=self.n_qubits)
         @qml.qnode(self.dev, interface='torch')
         def circuit(theta_flat: torch.Tensor, input_flat: torch.Tensor):
@@ -226,6 +229,31 @@ class ParameterizedQuantumCircuit(nn.Module):
 
         self.circuit = circuit
 
+        # Define PennyLane QNode for partial circuit execution (for Bloch sphere animation)
+        @qml.qnode(self.dev, interface='torch')
+        def partial_circuit(theta_flat: torch.Tensor, input_flat: torch.Tensor, max_block: int):
+            """
+            Executes the PQC up to max_block blocks for visualization purposes.
+            """
+            var_idx = 0
+            enc_idx = 0
+            for i in range(max_block):
+                name = self._quantum_blocks[i]
+                block = getattr(self, name)
+                param_count = block.params_per_block
+                if isinstance(block, VariationalBlock):
+                    angles = theta_flat[var_idx : var_idx + param_count]
+                    angles = angles.reshape(self.n_qubits, 3)
+                    block.apply(angles)
+                    var_idx += param_count
+                else:
+                    inputs = input_flat[enc_idx : enc_idx + param_count]
+                    block.apply(inputs)
+                    enc_idx += param_count
+            return [qml.density_matrix([i]) for i in range(self.n_qubits)]
+
+        self.partial_circuit = partial_circuit
+
         # Check number of trainable parameters
         self.total_theta = sum(
             getattr(self, name).params_per_block
@@ -250,6 +278,89 @@ class ParameterizedQuantumCircuit(nn.Module):
         """
         return cls(env_name=env_name, beta=beta, hardware_efficient_ansatz=ansatz_layers, n_qubits=n_qubits)
     
+    def animate_bloch_spheres(self, x: torch.Tensor, save: bool = False, filename: str = 'circuit_animation.gif',
+        fps: float = 20.0, dwell_time: float = 0.5, state_bounds: np.ndarray = None):
+        """
+        Animate the Bloch spheres layer-by-layer with smooth interpolation and equal dwell/transition time.
+        """
+        if state_bounds is None:
+            state_bounds = ENV_CONFIGS[self.env_name]['state_bounds']
+
+        # Prepare inputs & parameters
+        x_norm     = torch.tensor(np.array(x) / state_bounds, dtype=torch.float32).unsqueeze(0)
+        repeats    = self.total_inputs // self.n_qubits
+        input_flat = (x_norm.repeat(1, repeats) * self._lambda).detach().squeeze(0)
+        theta_flat = self._theta.detach()
+        n_blocks   = len(self._quantum_blocks)
+
+        # Compute raw Bloch vectors after each block
+        raw_vectors = []
+        for blk in range(n_blocks + 1):
+            dm_list = self.partial_circuit(theta_flat, input_flat, blk)
+            vecs = []
+            for rho in dm_list:
+                rho_np = rho.detach().numpy()
+                vx = 2 * np.real(rho_np[0, 1])
+                vy = 2 * np.imag(rho_np[0, 1])
+                vz = np.real(rho_np[0, 0] - rho_np[1, 1])
+                vecs.append(np.array([vx, vy, vz]))
+            raw_vectors.append(np.stack(vecs))
+
+        # Build the frame sequence
+        dwell_frames = max(1, int(fps * dwell_time))
+        interp_steps = dwell_frames
+        all_frames   = []
+        frame_layers = []
+
+        for k in range(1, n_blocks + 1):
+            # Interpolation: raw_vectors[k-1] -> raw_vectors[k]
+            v0 = raw_vectors[k - 1]
+            v1 = raw_vectors[k]
+            for i in range(1, interp_steps + 1):
+                a = i / float(interp_steps)
+                all_frames.append((1 - a) * v0 + a * v1)
+                frame_layers.append(k)
+            # Dwell on raw_vectors[k]
+            for _ in range(dwell_frames):
+                all_frames.append(v1)
+                frame_layers.append(k)
+
+        # Set up Bloch spheres
+        fig = plt.figure(figsize=(4 * self.n_qubits, 4), dpi=300)
+        axes = [fig.add_subplot(1, self.n_qubits, i + 1, projection='3d') for i in range(self.n_qubits)]
+        bloch_objs = []
+        for ax in axes:
+            b = Bloch(fig=fig, axes=ax)
+            b.add_states(qutip.basis(2, 0))
+            b.render()
+            b.font_size = 12
+            # b.view      = [30, 30]
+            bloch_objs.append(b)
+
+        def update(frame_idx):
+            layer = frame_layers[frame_idx]
+            vecs  = all_frames[frame_idx]
+            for q, b in enumerate(bloch_objs):
+                b.clear()
+                b.add_vectors([vecs[q]])
+                b.make_sphere()
+                axes[q].set_title(f'Qubit {q+1}', pad=8)
+            fig.suptitle(f'Applying layer {layer}/{n_blocks}', fontsize=14)
+            return bloch_objs
+
+        ani = animation.FuncAnimation(fig, update, frames=len(all_frames), interval=1000.0 / fps, blit=False, repeat=False)
+
+        if save:
+            os.makedirs('outputs', exist_ok=True)
+            out_path = os.path.join('outputs', filename)
+            ani.save(out_path, writer='pillow', fps=fps, dpi=300)
+            print(f"Circuit animation saved to {out_path}")
+            # Display Markdown to embed the GIF
+            display(Markdown(f"![Animation]({out_path})"))
+
+        plt.close(fig)
+        return ani
+
     def animate(self, n_steps: int = None, save: bool = True, filename: str = 'performance.gif',
                 fps: int = 20, state_bounds: np.ndarray = None):
         """
@@ -286,19 +397,74 @@ class ParameterizedQuantumCircuit(nn.Module):
         if save:
             os.makedirs('outputs', exist_ok=True)
             gif_path = os.path.join('outputs', filename)
-            frames[0].save(
-                gif_path,
-                save_all=True,
-                append_images=frames[1:],
-                optimize=False,
-                duration=int(1000/fps),  # Duration in milliseconds per frame
-                loop=0
-            )
+            frames[0].save(gif_path, save_all=True, append_images=frames[1:], optimize=False, duration=int(1000/fps), loop=0)
             print(f"Animation saved to {gif_path}")
             # Display Markdown to embed the GIF
             display(Markdown(f"![Animation]({gif_path})"))
 
         return gif_path
+
+    def animate_training(self, save: bool = False,
+                        filename: str = 'training_animation.gif',
+                        fps: int = 10):
+        """
+        Animate θ_i and reward vs episode.
+        """
+        if not hasattr(self, 'theta_history') or not hasattr(self, 'reward_history'):
+            raise ValueError("Training history not recorded. Please run train first.")
+
+        n_params = self.total_theta
+        episodes = len(self.theta_history)
+
+        # Shared x-axis for both panels
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), dpi=300, sharex=True, gridspec_kw={'height_ratios': [2, 1]})
+
+        # Top panel: parameter evolution
+        ax1.set_title('Rotation Gate Parameters', fontsize=12)
+        ax1.set_ylabel('θ (rad)', fontsize=10)
+        ax1.set_ylim(0, np.pi)
+        ax1.set_yticks([0, np.pi/4, np.pi/2, 3*np.pi/4, np.pi])
+        ax1.set_yticklabels(['0', r'$\frac{\pi}{4}$', r'$\frac{\pi}{2}$', r'$\frac{3\pi}{4}$', r'$\pi$'], fontsize=9)
+
+        cmap = plt.cm.gist_earth
+        colors = cmap(np.linspace(0, 1, n_params))
+        lines = [ax1.plot([], [], color=colors[i], linewidth=1)[0] for i in range(n_params)]
+
+        # Bottom panel: reward history
+        ax2.set_ylabel('Reward', fontsize=10)
+        ax2.set_xlabel('Episode', fontsize=10)
+        ax2.set_ylim(0, max(self.reward_history))
+        reward_line, = ax2.plot([], [], color='crimson', linewidth=2)
+        plt.tight_layout()
+
+        def init():
+            for ln in lines:
+                ln.set_data([], [])
+            reward_line.set_data([], [])
+            return lines + [reward_line]
+
+        def update(ep):
+            x = np.arange(ep + 1)
+            # Parameter update
+            for i, ln in enumerate(lines):
+                y = [self.theta_history[e][i].item() for e in x]
+                ln.set_data(x, y)
+            # Reward update
+            reward_line.set_data(x, self.reward_history[:ep + 1])
+            ax2.set_xlim(0, episodes)
+            return lines + [reward_line]
+
+        ani = animation.FuncAnimation(fig, update, frames=range(episodes), init_func=init, interval=1000/fps, blit=True, repeat=False)
+
+        if save:
+            os.makedirs('outputs', exist_ok=True)
+            out_path = os.path.join('outputs', filename)
+            ani.save(out_path, writer='pillow', fps=fps, dpi=300)
+            display(Markdown(f"![Animation]({out_path})"))
+
+        plt.close(fig)
+        return ani
+
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -341,6 +507,7 @@ class ParameterizedQuantumCircuit(nn.Module):
 
         self.loss_history = []
         self.reward_history = []
+        self.theta_history = []  # Record parameter evolution
         best_reward = -float("inf")
         best_state = None
 
@@ -397,6 +564,7 @@ class ParameterizedQuantumCircuit(nn.Module):
             total_reward = sum(r for _, _, r in trajectory)
             self.loss_history.append(loss.item())
             self.reward_history.append(total_reward)
+            self.theta_history.append(self._theta.clone().detach())
 
             if total_reward > best_reward:
                 best_reward = total_reward
@@ -429,15 +597,16 @@ class ParameterizedQuantumCircuit(nn.Module):
             else:
                 gif_path = self.animate(save=save, filename='final_performance.gif', state_bounds=state_bounds)
 
-            if return_histories:
-                return self.loss_history, self.reward_history
-            else:
-                return None
+        if return_histories:
+            return self.loss_history, self.reward_history
+        else:
+            return None
 
     def evaluate(self, render: bool = False, state_bounds: np.ndarray = None) -> float:
         """
         Evaluate the trained policy for one full episode.
         """
+       
         env = gym.make(self.env_name, render_mode='rgb_array' if render else None)
         if state_bounds is None:
             state_bounds = ENV_CONFIGS[self.env_name]['state_bounds']
@@ -480,7 +649,6 @@ class ParameterizedQuantumCircuit(nn.Module):
         plt.title(f'Training Rewards on {self.env_name}', fontsize=14, fontweight='bold')
         plt.legend(loc='best', frameon=True, framealpha=0.9)
         plt.grid(True, alpha=0.3)
-        plt.tight_layout()
         plt.savefig('outputs/pqc_training.png', dpi=300, bbox_inches='tight')
         plt.show()
         
@@ -496,23 +664,24 @@ class ParameterizedQuantumCircuit(nn.Module):
         reuploading_input = [f"$x_{i % self.n_qubits}$" for i in range(self.total_inputs)]
         scaled_input = [f"{reuploading_input[i]} • {self._lambda.detach()[i].item():.2f}" for i in range(self.total_inputs)]
                 
-        # drawing = draw_mpl(self.circuit, style=style, show_all=True, show_wires=True, decimals=2, fontsize=fontsize)
-        # drawing(theta_flat=self._theta.detach(), input_flat=scaled_input)
-        
         drawer = draw_mpl(self.circuit, style=style, show_all=True, show_wires=True, decimals=2, fontsize=fontsize)
         fig, ax = drawer(theta_flat=self._theta.detach(), input_flat=scaled_input)
         if title is not None:
             fig.suptitle(title, fontweight="bold", fontsize=16) 
         plt.show()
 
-        
 if __name__ == "__main__":
+    seed = 808
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    np.bool8 = np.bool_  # Prevent deprecation warning
+    
     sequence = (BlockSequence()
         .EncodingLayer()
         .VariationalLayer()
-        .EncodingLayer()
         .VariationalLayer()
-        .EncodingLayer()
+        .VariationalLayer()
+        .VariationalLayer()
         .VariationalLayer()
     )
 
@@ -523,4 +692,7 @@ if __name__ == "__main__":
         custom_blocks=sequence,
     )
 
-    model.draw_circuit(title="test")
+    x = [2.1, -1.8, 2.3, 1.2]  # Random input state
+    model.animate_bloch_spheres(x, save=True)
+    model.train()
+    model.animate_training(save=True)
