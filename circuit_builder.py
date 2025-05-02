@@ -17,12 +17,6 @@ from tqdm import tqdm
 from pennylane import draw_mpl
 from configs import ENV_CONFIGS
 
-# TODO: add more configs
-# TODO: update setup
-# TODO: add different entangling topologies
-# TODO: clean up demo.ipynb -- animations, diagrams
-# TODO: look through animation code, clean it up
-
 seed = 777
 np.random.seed(seed)
 torch.manual_seed(seed)
@@ -277,11 +271,215 @@ class ParameterizedQuantumCircuit(nn.Module):
         One-line constructor for a hardware-efficient ansatz with increased depth.
         """
         return cls(env_name=env_name, beta=beta, hardware_efficient_ansatz=ansatz_layers, n_qubits=n_qubits)
-    
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass: maps state inputs to action probabilities.
+        """
+        repeats = self.total_inputs // self.n_qubits
+        x_tiled = x.repeat(1, repeats)
+        scaled_inputs = x_tiled * self._lambda
+        batch_size = x.shape[0]
+        theta_batch = self._theta.unsqueeze(0).repeat(batch_size, 1)
+
+        obs_values = torch.zeros(batch_size, 1)
+        for idx in range(batch_size):
+            obs_values[idx] = self.circuit(theta_batch[idx], scaled_inputs[idx])
+
+        logits = self.alternating(obs_values) * self.beta
+        action_probs = self.softmax(logits)
+        return action_probs
+
+    def train(self, gamma: float = 1.0, plot: bool = False, save: bool = True, animate: bool = True, 
+              early_stopping: bool = True, return_histories: bool = False) -> (None or 'tuple'): # type: ignore
+        """
+        Train the policy using the PQC REINFORCE algorithm.
+        """
+        # Use environment-specific configuration
+        env_config = ENV_CONFIGS[self.env_name]
+        n_episodes = env_config['n_episodes']
+        state_bounds = env_config['state_bounds']
+        learning_rate_theta = env_config['learning_rate_theta']
+        learning_rate_lambda = env_config['learning_rate_lambda']
+        learning_rate_weights = env_config['learning_rate_weights']
+            
+        env = gym.make(self.env_name)
+        threshold = env_config.get('reward_threshold', 500)
+        
+        # Set up the optimizers with different learning rates
+        optimizer_theta = torch.optim.Adam([self._theta], lr=learning_rate_theta, amsgrad=True)
+        optimizer_lambda = torch.optim.Adam([self._lambda], lr=learning_rate_lambda, amsgrad=True)
+        optimizer_weights = torch.optim.Adam(self.alternating.parameters(), lr=learning_rate_weights, amsgrad=True)
+
+        self.loss_history = []
+        self.reward_history = []
+        self.theta_history = []  # Record parameter evolution
+        best_reward = -float("inf")
+        best_state = None
+
+        # Training loop (tqdm better if there's no early stopping)
+        for episode in range(n_episodes):
+            state, _ = env.reset(seed=seed)
+            done = False
+            trajectory = []
+            
+            # Collect trajectory by rolling out the policy in the env
+            while not done:
+                obs_norm = np.array(state) / state_bounds
+                state_t = torch.tensor(obs_norm, dtype=torch.float32).unsqueeze(0)
+                # Predict action probabilities
+                with torch.no_grad():
+                    probs = self(state_t).cpu().numpy()[0]
+                # Sample an action from the policy
+                action = np.random.choice(self.n_actions, p=probs)
+                next_state, reward, terminated, truncated, _ = env.step(action)
+                done = terminated or truncated
+                trajectory.append((obs_norm, action, reward))
+                state = next_state
+            
+            # Compute discounted returns from rewards
+            returns = []
+            R = 0.0
+            for _, _, r in reversed(trajectory):
+                R = r + gamma * R
+                returns.insert(0, R)
+            returns = np.array(returns, dtype=np.float32)
+            if len(returns) > 1:
+                returns = (returns - returns.mean()) / (returns.std() + 1e-8)
+
+            # Prepare data for policy gradient
+            states_np = np.stack([t[0] for t in trajectory])
+            states = torch.from_numpy(states_np).float()
+            actions = torch.tensor([t[1] for t in trajectory], dtype=torch.long)
+            returns_t = torch.tensor(returns, dtype=torch.float32)
+
+            # Calculate the policy loss
+            logits = self(states)
+            selected = logits[range(len(actions)), actions]
+            log_probs = torch.log(selected + 1e-8)
+            loss = -torch.mean(log_probs * returns_t)
+
+            # Optimize the policy parameters
+            optimizer_theta.zero_grad()
+            optimizer_lambda.zero_grad()
+            optimizer_weights.zero_grad()
+            loss.backward()
+            optimizer_theta.step()
+            optimizer_lambda.step()
+            optimizer_weights.step()
+
+            total_reward = sum(r for _, _, r in trajectory)
+            self.loss_history.append(loss.item())
+            self.reward_history.append(total_reward)
+            self.theta_history.append(self._theta.clone().detach())
+
+            if total_reward > best_reward:
+                best_reward = total_reward
+                best_state = self.state_dict()
+
+            print(f"Episode {episode+1}: Reward = {total_reward}", end="\r")
+
+            if early_stopping and best_reward >= threshold:
+                print(f"Environment solved in {episode+1} episodes! Reward={best_reward:.2f}")
+                break
+
+        env.close()
+        print(f"\nTraining completed. Best reward: {best_reward:.2f}")
+
+        if plot:
+            self.plot_training()
+        
+        if save:
+            os.makedirs('outputs', exist_ok=True)
+            torch.save(best_state, 'outputs/pqc_best.pt')
+            np.save('outputs/pqc_loss.npy', self.loss_history)
+            np.save('outputs/pqc_reward.npy', self.reward_history)
+
+        if animate:
+            if save and best_state is not None:
+                current_state = self.state_dict()
+                self.load_state_dict(best_state)
+                gif_path = self.animate(save=True, filename='best_performance.gif', state_bounds=state_bounds)
+                self.load_state_dict(current_state)
+            else:
+                gif_path = self.animate(save=save, filename='final_performance.gif', state_bounds=state_bounds)
+
+        if return_histories:
+            return self.loss_history, self.reward_history
+        else:
+            return None
+
+    def evaluate(self, render: bool = False, state_bounds: np.ndarray = None) -> float:
+        """
+        Evaluate the trained policy for one full episode.
+        """
+        env = gym.make(self.env_name, render_mode='rgb_array' if render else None)
+        if state_bounds is None:
+            state_bounds = ENV_CONFIGS[self.env_name]['state_bounds']
+
+        state, _ = env.reset(seed=seed)
+        total_reward = 0.0
+        done = False
+
+        while not done:
+            normalized = np.array(state) / state_bounds
+            state_tensor = torch.tensor(normalized, dtype=torch.float32).unsqueeze(0)
+            with torch.no_grad():
+                probs = self(state_tensor).cpu().numpy()[0]
+            action = int(np.argmax(probs))
+            next_state, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
+            total_reward += reward
+            state = next_state
+
+        env.close()
+        return total_reward
+
+    def draw_circuit(self, style='pennylane_sketch', fontsize='small', dpi=300, title=None):
+        """
+        Draw the circuit diagram of the PQC with all trained parameters.
+        """
+        # Suppress a fontconfig warning
+        os.environ['LC_ALL'] = 'en_US.UTF-8'
+        os.environ['LANG']   = 'en_US.UTF-8'
+        locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
+                
+        reuploading_input = [f"$x_{i % self.n_qubits}$" for i in range(self.total_inputs)]
+        scaled_input = [f"{reuploading_input[i]} • {self._lambda.detach()[i].item():.2f}" for i in range(self.total_inputs)]
+                
+        drawer = draw_mpl(self.circuit, style=style, show_all=True, show_wires=True, decimals=2, fontsize=fontsize)
+        fig, ax = drawer(theta_flat=self._theta.detach(), input_flat=scaled_input)
+        if title is not None:
+            fig.suptitle(title, fontweight="bold", fontsize=16) 
+        plt.show()
+
+    def plot_training(self):
+        """
+        Plot the episode rewards over training.
+        """
+        os.makedirs('outputs', exist_ok=True)
+        
+        plt.figure(figsize=(10, 6), dpi=300)
+        plt.plot(self.reward_history, color='dodgerblue', alpha=1.0, label='Episode Reward')
+        
+        # Add threshold line
+        threshold = ENV_CONFIGS[self.env_name].get('reward_threshold')
+        if threshold:
+            plt.axhline(y=threshold, color='tab:red', linestyle='--', alpha=0.7, 
+                        label=f'Solution Threshold ({threshold})')
+        
+        plt.xlabel('Episode', fontsize=12)
+        plt.ylabel('Reward', fontsize=12)
+        plt.title(f'Training Rewards on {self.env_name}', fontsize=14, fontweight='bold')
+        plt.legend(loc='best', frameon=True, framealpha=0.9)
+        plt.grid(True, alpha=0.3)
+        plt.savefig('outputs/pqc_training.png', dpi=300, bbox_inches='tight')
+        plt.show()
+
     def animate_bloch_spheres(self, x: torch.Tensor, save: bool = False, filename: str = 'circuit_animation.gif',
         fps: float = 20.0, dwell_time: float = 0.5, state_bounds: np.ndarray = None):
         """
-        Animate the Bloch spheres layer-by-layer with smooth interpolation and equal dwell/transition time.
+        Animate the Bloch spheres layer-by-layer with smooth interpolation.
         """
         if state_bounds is None:
             state_bounds = ENV_CONFIGS[self.env_name]['state_bounds']
@@ -365,7 +563,6 @@ class ParameterizedQuantumCircuit(nn.Module):
                 fps: int = 20, state_bounds: np.ndarray = None):
         """
         Run the current policy in the environment, capture frames, and save as a GIF.
-        Returns the path to the saved GIF and displays Markdown for embedding.
         """
         env = gym.make(self.env_name, render_mode='rgb_array')
         if state_bounds is None:
@@ -465,234 +662,29 @@ class ParameterizedQuantumCircuit(nn.Module):
         plt.close(fig)
         return ani
 
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass: maps state inputs to action probabilities.
-        """
-        repeats = self.total_inputs // self.n_qubits
-        x_tiled = x.repeat(1, repeats)
-        scaled_inputs = x_tiled * self._lambda
-        batch_size = x.shape[0]
-        theta_batch = self._theta.unsqueeze(0).repeat(batch_size, 1)
-
-        obs_values = torch.zeros(batch_size, 1)
-        for idx in range(batch_size):
-            obs_values[idx] = self.circuit(theta_batch[idx], scaled_inputs[idx])
-
-        logits = self.alternating(obs_values) * self.beta
-        action_probs = self.softmax(logits)
-        return action_probs
-
-    def train(self, gamma: float = 1.0, plot: bool = False, save: bool = True, animate: bool = True, 
-              early_stopping: bool = True, return_histories: bool = False) -> (None or 'tuple'): # type: ignore
-        """
-        Train the policy using the PQC REINFORCE algorithm.
-        """
-        # Use environment-specific configuration
-        env_config = ENV_CONFIGS[self.env_name]
-        n_episodes = env_config['n_episodes']
-        state_bounds = env_config['state_bounds']
-        learning_rate_theta = env_config['learning_rate_theta']
-        learning_rate_lambda = env_config['learning_rate_lambda']
-        learning_rate_weights = env_config['learning_rate_weights']
-            
-        env = gym.make(self.env_name)
-        threshold = env_config.get('reward_threshold', 500)
-        
-        # Set up the optimizers with different learning rates
-        optimizer_theta = torch.optim.Adam([self._theta], lr=learning_rate_theta, amsgrad=True)
-        optimizer_lambda = torch.optim.Adam([self._lambda], lr=learning_rate_lambda, amsgrad=True)
-        optimizer_weights = torch.optim.Adam(self.alternating.parameters(), lr=learning_rate_weights, amsgrad=True)
-
-        self.loss_history = []
-        self.reward_history = []
-        self.theta_history = []  # Record parameter evolution
-        best_reward = -float("inf")
-        best_state = None
-
-        for episode in range(n_episodes):
-            state, _ = env.reset(seed=seed)
-            done = False
-            trajectory = []
-            
-            # Collect trajectory by rolling out the policy in the env
-            while not done:
-                obs_norm = np.array(state) / state_bounds
-                state_t = torch.tensor(obs_norm, dtype=torch.float32).unsqueeze(0)
-                # Predict action probabilities
-                with torch.no_grad():
-                    probs = self(state_t).cpu().numpy()[0]
-                # Sample an action from the policy
-                action = np.random.choice(self.n_actions, p=probs)
-                next_state, reward, terminated, truncated, _ = env.step(action)
-                done = terminated or truncated
-                trajectory.append((obs_norm, action, reward))
-                state = next_state
-            
-            # Compute discounted returns from rewards
-            returns = []
-            R = 0.0
-            for _, _, r in reversed(trajectory):
-                R = r + gamma * R
-                returns.insert(0, R)
-            returns = np.array(returns, dtype=np.float32)
-            if len(returns) > 1:
-                returns = (returns - returns.mean()) / (returns.std() + 1e-8)
-
-            # Prepare data for policy gradient
-            states_np = np.stack([t[0] for t in trajectory])
-            states = torch.from_numpy(states_np).float()
-            actions = torch.tensor([t[1] for t in trajectory], dtype=torch.long)
-            returns_t = torch.tensor(returns, dtype=torch.float32)
-
-            # Calculate the policy loss
-            logits = self(states)
-            selected = logits[range(len(actions)), actions]
-            log_probs = torch.log(selected + 1e-8)
-            loss = -torch.mean(log_probs * returns_t)
-
-            # Optimize the policy parameters
-            optimizer_theta.zero_grad()
-            optimizer_lambda.zero_grad()
-            optimizer_weights.zero_grad()
-            loss.backward()
-            optimizer_theta.step()
-            optimizer_lambda.step()
-            optimizer_weights.step()
-
-            total_reward = sum(r for _, _, r in trajectory)
-            self.loss_history.append(loss.item())
-            self.reward_history.append(total_reward)
-            self.theta_history.append(self._theta.clone().detach())
-
-            if total_reward > best_reward:
-                best_reward = total_reward
-                best_state = self.state_dict()
-
-            print(f"Episode {episode+1}: Reward = {total_reward}", end="\r")
-
-            if early_stopping and best_reward >= threshold:
-                print(f"Environment solved in {episode+1} episodes! Reward={best_reward:.2f}")
-                break
-
-        env.close()
-        print(f"\nTraining completed. Best reward: {best_reward:.2f}")
-
-        if plot:
-            self.plot_training()
-        
-        if save:
-            os.makedirs('outputs', exist_ok=True)
-            torch.save(best_state, 'outputs/pqc_best.pt')
-            np.save('outputs/pqc_loss.npy', self.loss_history)
-            np.save('outputs/pqc_reward.npy', self.reward_history)
-
-        if animate:
-            if save and best_state is not None:
-                current_state = self.state_dict()
-                self.load_state_dict(best_state)
-                gif_path = self.animate(save=True, filename='best_performance.gif', state_bounds=state_bounds)
-                self.load_state_dict(current_state)
-            else:
-                gif_path = self.animate(save=save, filename='final_performance.gif', state_bounds=state_bounds)
-
-        if return_histories:
-            return self.loss_history, self.reward_history
-        else:
-            return None
-
-    def evaluate(self, render: bool = False, state_bounds: np.ndarray = None) -> float:
-        """
-        Evaluate the trained policy for one full episode.
-        """
-       
-        env = gym.make(self.env_name, render_mode='rgb_array' if render else None)
-        if state_bounds is None:
-            state_bounds = ENV_CONFIGS[self.env_name]['state_bounds']
-
-        state, _ = env.reset(seed=seed)
-        total_reward = 0.0
-        done = False
-
-        while not done:
-            normalized = np.array(state) / state_bounds
-            state_tensor = torch.tensor(normalized, dtype=torch.float32).unsqueeze(0)
-            with torch.no_grad():
-                probs = self(state_tensor).cpu().numpy()[0]
-            action = int(np.argmax(probs))
-            next_state, reward, terminated, truncated, _ = env.step(action)
-            done = terminated or truncated
-            total_reward += reward
-            state = next_state
-
-        env.close()
-        return total_reward
-
-    def plot_training(self):
-        """
-        Plot the episode rewards over training with improved aesthetics.
-        """
-        os.makedirs('outputs', exist_ok=True)
-        
-        plt.figure(figsize=(10, 6), dpi=300)
-        plt.plot(self.reward_history, color='dodgerblue', alpha=1.0, label='Episode Reward')
-        
-        # Add threshold line
-        threshold = ENV_CONFIGS[self.env_name].get('reward_threshold')
-        if threshold:
-            plt.axhline(y=threshold, color='tab:red', linestyle='--', alpha=0.7, 
-                        label=f'Solution Threshold ({threshold})')
-        
-        plt.xlabel('Episode', fontsize=12)
-        plt.ylabel('Reward', fontsize=12)
-        plt.title(f'Training Rewards on {self.env_name}', fontsize=14, fontweight='bold')
-        plt.legend(loc='best', frameon=True, framealpha=0.9)
-        plt.grid(True, alpha=0.3)
-        plt.savefig('outputs/pqc_training.png', dpi=300, bbox_inches='tight')
-        plt.show()
-        
-    def draw_circuit(self, style='pennylane_sketch', fontsize='small', dpi=300, title=None):
-        """
-        Draw the circuit diagram of the PQC with all trained parameters.
-        """
-        # Suppress a fontconfig warning
-        os.environ['LC_ALL'] = 'en_US.UTF-8'
-        os.environ['LANG']   = 'en_US.UTF-8'
-        locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
-                
-        reuploading_input = [f"$x_{i % self.n_qubits}$" for i in range(self.total_inputs)]
-        scaled_input = [f"{reuploading_input[i]} • {self._lambda.detach()[i].item():.2f}" for i in range(self.total_inputs)]
-                
-        drawer = draw_mpl(self.circuit, style=style, show_all=True, show_wires=True, decimals=2, fontsize=fontsize)
-        fig, ax = drawer(theta_flat=self._theta.detach(), input_flat=scaled_input)
-        if title is not None:
-            fig.suptitle(title, fontweight="bold", fontsize=16) 
-        plt.show()
-
-if __name__ == "__main__":
-    seed = 808
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    np.bool8 = np.bool_  # Prevent deprecation warning
+# if __name__ == "__main__":
+#     seed = 808
+#     np.random.seed(seed)
+#     torch.manual_seed(seed)
+#     np.bool8 = np.bool_  # Prevent deprecation warning
     
-    sequence = (BlockSequence()
-        .EncodingLayer()
-        .VariationalLayer()
-        .VariationalLayer()
-        .VariationalLayer()
-        .VariationalLayer()
-        .VariationalLayer()
-    )
+#     sequence = (BlockSequence()
+#         .EncodingLayer()
+#         .VariationalLayer()
+#         .VariationalLayer()
+#         .VariationalLayer()
+#         .VariationalLayer()
+#         .VariationalLayer()
+#     )
 
-    model = ParameterizedQuantumCircuit(
-        env_name='CartPole-v1',
-        n_qubits=4,
-        beta=1.0,
-        custom_blocks=sequence,
-    )
+#     model = ParameterizedQuantumCircuit(
+#         env_name='CartPole-v1',
+#         n_qubits=4,
+#         beta=1.0,
+#         custom_blocks=sequence,
+#     )
 
-    x = [2.1, -1.8, 2.3, 1.2]  # Random input state
-    model.animate_bloch_spheres(x, save=True)
-    model.train()
-    model.animate_training(save=True)
+#     x = [2.1, -1.8, 2.3, 1.2]  # Random input state
+#     model.animate_bloch_spheres(x, save=True)
+#     model.train()
+#     model.animate_training(save=True)

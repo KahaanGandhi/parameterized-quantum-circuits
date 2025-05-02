@@ -19,7 +19,7 @@ ENV_CONFIGS = {
     "learning_rate_weights": 0.01,
     "beta": 1.0,
     "reward_threshold": 200.0,
-    "n_episodes": 2000,
+    "n_episodes": 4000,
     "n_qubits": None,
   },
 }
