@@ -1,5 +1,5 @@
 # src/benchmarking/driver.py
-# Run from root directory with: python -m benchmarking.run_benchmark
+# Run from root directory with: python -m src.benchmarking.run_benchmark
 
 import os
 import numpy as np
@@ -9,8 +9,8 @@ import argparse
 import torch
 from tqdm import tqdm
 
-from benchmarking.models.DQN import DQNAgent
-from benchmarking.models.PQC import PQCAgent, train_pqc
+from src.benchmarking.models.DQN import DQNAgent
+from src.benchmarking.models.PQC import PQCAgent, train_pqc
 
 # Plotting utility for benchmark comparisons
 def plot_benchmarks(results_dict, title="Benchmark", filename="outputs/benchmark_rewards.png"):
