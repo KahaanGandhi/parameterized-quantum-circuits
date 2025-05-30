@@ -1,8 +1,7 @@
-Parameterized quantum circuits (PQCs) enable quantum reinforcement learning by mapping classical states to action probabilities via trainable gates, which we optimize to solve control tasks like CartPole using PennyLane for simulation and PyTorch for gradient-based training.
+Parameterized quantum circuits (PQCs) enable quantum reinforcement learning by mapping classical states to action probabilities via trainable gates. Leveraging quantum architectures like the Hardware-Efficient Ansatz, data re-uploading techniques, and variational layers, PQCs act as universal function approximators—similar to classical neural networks—but rely on circuit depth rather than layer width to achieve expressivity.
 
-Contents include:
-* `circuit_builder.py`: Full PQC architecture with variational and encoding layers, including methods for circuit construction, REINFORCE-based training, and model evaluation.
-* `demo.ipynb`: Example workflows using PQCs, with a simple two-line end-to-end training example. Includes tools to draw circuit diagrams, animate Bloch spheres, and visualize model performance on reinforcement learning tasks.
-* `report.pdf`: Derivation of the parameter-shift rule and how its gradient estimates drive the learning algorithm.
+However, existing quantum machine learning libraries often cater to experienced quantum researchers with workflows that differ from those used in classical machine learning. This makes it difficult to explore new ideas or develop initial proofs of concept without a substantial investment in learning new tools.
 
-_Final project for Phys 302 (Advanced Quantum Mechanics) at Haverford College._
+To bridge this gap, this project introduces a PyTorch-like framework for PQC design. The included `demo.ipynb` notebook demonstrates how PQCs can be easily built, trained, and evaluated in the CartPole-v1 environment.
+
+Accompanying these tools is a theoretical primer (`report.pdf`) that introduces the relevant concepts from both quantum computing (parameterized gates, the parameter-shift rule, circuit ansatz) and reinforcement learning (policy selection, policy gradient estimation) needed to implement REINFORCE as a variational quantum algorithm. The project uses PennyLane to simulate quantum hardware and PyTorch for gradient-based training.
